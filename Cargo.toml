@@ -1,0 +1,19 @@
+[package]
+name = "bitlight-core-derive"
+description = "A Rust library providing derive macros for the Bitlight core."
+version = "0.1.0"
+authors = ["Bitlight Labs"]
+edition = "2021"
+homepage = "https://bitlightlabs.com/"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/bitlightlabs/bitlight-core-derive"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+proc-macro = true
+
+[dependencies]
+anyhow = "1.0"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["extra-traits"] }
