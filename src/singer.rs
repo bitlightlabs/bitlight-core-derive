@@ -1,10 +1,26 @@
-use proc_macro2::TokenStream;
+use darling::ast::Data;
+use darling::{FromDeriveInput, FromField};
+use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
+use syn::{Generics, Type};
 
-use crate::StructReceiver;
+use crate::{field_ident, type_is_optional};
 
-impl StructReceiver {
-    pub(crate) fn signer_render(self) -> TokenStream {
+#[derive(FromField)]
+struct SignerFieldReceiver {
+    ty: Type,
+    ident: Option<Ident>,
+}
+
+#[derive(FromDeriveInput)]
+pub(crate) struct SignerStructReceiver {
+    ident: Ident,
+    generics: Generics,
+    data: Data<(), SignerFieldReceiver>,
+}
+
+impl SignerStructReceiver {
+    pub(crate) fn render(self) -> TokenStream {
         let ident = self.ident;
         let (impl_generics, type_generics, where_clause) = self.generics.split_for_impl();
 
@@ -15,14 +31,10 @@ impl StructReceiver {
             .expect("Don't support enum")
             .fields
             .into_iter()
-            .filter(|field| !field.is_optional())
+            .filter(|field| !type_is_optional(&field.ty))
             .enumerate()
             .map(|(index, field)| {
-                let field_ident = field.ident.as_ref().map(|v| quote!(#v)).unwrap_or_else(|| {
-                    let index = syn::Index::from(index);
-                    quote!(#index)
-                });
-
+                let field_ident = field_ident(field.ident.as_ref(), index);
                 let field_name = field_ident.to_string();
                 let field_string_name = format_ident!("{}_string", field_name);
 
@@ -51,20 +63,22 @@ impl StructReceiver {
 mod tests {
     use darling::FromDeriveInput;
 
-    use crate::StructReceiver;
+    use super::SignerStructReceiver;
 
     #[test]
     fn print_signer_render() {
-        let input = r#"#[derive(Signer)]
-pub struct FakeSigner<T> {
+        let input = r#"
+#[derive(Signer)]
+struct FakeSigner<T> {
     name: String,
     age: i32,
     bar: Option<T>,
-}"#;
+}
+"#;
 
         let parsed = syn::parse_str(input).unwrap();
-        let receiver = StructReceiver::from_derive_input(&parsed).unwrap();
-        let tokens = receiver.signer_render();
+        let receiver = SignerStructReceiver::from_derive_input(&parsed).unwrap();
+        let tokens = receiver.render();
         println!("{}", tokens);
     }
 }
