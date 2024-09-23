@@ -1,13 +1,54 @@
-use std::collections::HashSet;
+use std::fmt::{self, Display, Formatter};
 
-use darling::{ast::Data, FromDeriveInput, FromField};
+use better_default::Default;
+use darling::{ast::Data, FromDeriveInput, FromField, FromMeta};
 use iter_tools::{multiunzip, Itertools};
 use proc_macro2::TokenStream;
 use quote::quote;
-use stringcase::pascal_case;
-use syn::{GenericArgument, Generics, Ident, PathArguments, Type};
+use syn::{AngleBracketedGenericArguments, GenericArgument, Generics, Ident, PathArguments, Type};
 
 use crate::field_ident;
+
+#[derive(Debug, Clone, Copy, FromMeta)]
+enum OrderBy {
+    Asc,
+    Desc,
+}
+
+impl Display for OrderBy {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let order = match self {
+            OrderBy::Asc => "ASC",
+            OrderBy::Desc => "DESC",
+        };
+        write!(f, "{order}")
+    }
+}
+
+#[derive(Clone, Copy, Default, FromMeta, Eq, PartialEq)]
+enum FieldEntityType {
+    #[default]
+    Normal,
+    Primary,
+    Searchable,
+}
+
+struct FieldMeta {
+    name: String,
+    ident: Ident,
+    ty: Type,
+    entity_type: FieldEntityType,
+}
+
+impl FieldMeta {
+    fn is_normal(&self) -> bool {
+        self.entity_type == FieldEntityType::Normal
+    }
+
+    fn is_primary(&self) -> bool {
+        self.entity_type == FieldEntityType::Primary
+    }
+}
 
 #[derive(FromField)]
 #[darling(attributes(entity))]
@@ -15,7 +56,8 @@ struct EntityBuilderFieldReceiver {
     ty: Type,
     ident: Option<Ident>,
     #[darling(default)]
-    searchable: bool,
+    field_type: FieldEntityType,
+    order_by: Option<OrderBy>,
 }
 
 #[derive(FromDeriveInput)]
@@ -24,47 +66,51 @@ pub(crate) struct EntityBuilderStructReceiver {
     ident: Ident,
     generics: Generics,
     table_name: String,
-    order_by: Option<String>,
     data: Data<(), EntityBuilderFieldReceiver>,
 }
 
-fn type_is_gzip_strict_type(ty: &Type) -> Option<&Ident> {
+fn append_generic_idents(
+    generic_idents: &mut String,
+    generics_arguments: &AngleBracketedGenericArguments,
+) {
+    for argument in generics_arguments.args.iter() {
+        if let GenericArgument::Type(Type::Path(type_path)) = argument {
+            if let Some(segment) = type_path.path.segments.last() {
+                generic_idents.push_str(&segment.ident.to_string());
+                if let PathArguments::AngleBracketed(ref generics_arguments) = segment.arguments {
+                    generic_idents.push('<');
+                    append_generic_idents(generic_idents, generics_arguments);
+                    generic_idents.push('>');
+                }
+            }
+        }
+    }
+}
+
+fn type_is_gzip_strict_type(ty: &Type) -> Option<Type> {
     if let Type::Path(ref type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "GzipStrictType" {
-                if let PathArguments::AngleBracketed(ref angle_bracketed) = segment.arguments {
+                if let PathArguments::AngleBracketed(ref generics_arguments) = segment.arguments {
+                    let mut generics_idents = String::new();
+                    append_generic_idents(&mut generics_idents, generics_arguments);
                     if let Some(GenericArgument::Type(Type::Path(ref type_path))) =
-                        angle_bracketed.args.last()
+                        generics_arguments.args.last()
                     {
-                        return type_path.path.segments.last().map(|segment| &segment.ident);
+                        return type_path.path.segments.last().and_then(|segment| {
+                            let ty = if generics_idents.is_empty() {
+                                segment.ident.to_string()
+                            } else {
+                                generics_idents
+                            };
+                            Type::from_string(&ty).ok()
+                        });
                     }
                 }
             }
         }
     }
     None
-}
-
-fn parse_order_by(order_by: Option<&str>) -> HashSet<String> {
-    order_by
-        .map(|stat| {
-            stat.split(",")
-                .map(|splits| {
-                    let mut splits = splits.trim().split(" ");
-                    match (splits.next(), splits.next().unwrap_or("asc")) {
-                        (Some(col), order) => {
-                            match order.to_ascii_lowercase().as_str() {
-                                "asc" | "desc" => (),
-                                ty => panic!("Unsupported sort type of: '{ty}'"),
-                            }
-                            col.to_string()
-                        }
-                        _ => panic!("Incorrect order by format of: '{stat}'"),
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 impl EntityBuilderStructReceiver {
@@ -80,23 +126,35 @@ impl EntityBuilderStructReceiver {
             .fields
             .iter()
             .enumerate()
-            .filter_map(|(index, field)| {
+            .flat_map(|(index, field)| {
                 let field_ident = field_ident(field.ident.as_ref(), index);
                 type_is_gzip_strict_type(&field.ty).map(|data_ident| (field_ident, data_ident))
             })
             .collect::<Vec<_>>();
 
-        if gzip_strict_fields.len() != 1 {
-            panic!("Only one GzipStrictData supported.");
+        if gzip_strict_fields.is_empty() {
+            panic!("GzipStrictType not found");
         }
 
-        let field_ident = gzip_strict_fields[0].0.clone();
-        let rgb_data_ident = gzip_strict_fields[0].1;
+        let (fields_names, fields_type): (Vec<_>, Vec<_>) = multiunzip(gzip_strict_fields);
+        let (into_data_type, into_data_body) = if fields_type.len() > 1 {
+            (
+                quote! { (#(#fields_type),*) },
+                quote! { (#(self.#fields_names.into_inner()),*) },
+            )
+        } else {
+            (
+                quote! { #(#fields_type),* },
+                quote! { #(self.#fields_names.into_inner()),* },
+            )
+        };
 
         quote! {
-            impl #impl_generics crate::entity::RgbPersistenceData<#rgb_data_ident> for #ident #type_generics #where_clause {
-                fn into_data(self) -> #rgb_data_ident {
-                    self.#field_ident.into_inner()
+            use crate::entity::RgbPersistenceData;
+
+            impl #impl_generics crate::entity::RgbPersistenceData<(#(#fields_type),*)> for #ident #type_generics #where_clause {
+                fn into_data(self) -> #into_data_type {
+                    #into_data_body
                 }
             }
         }
@@ -112,130 +170,165 @@ impl EntityBuilderStructReceiver {
 
         let (impl_generics, type_generics, where_clause) = self.generics.split_for_impl();
 
-        let mut searchable_key_metas = Vec::new();
-        let mut order_by_fields = parse_order_by(self.order_by.as_deref());
+        let mut order_by_fragments = Vec::new();
 
-        let field_idents = data
+        let fields_meta = data
             .as_ref()
             .take_struct()
             .unwrap()
             .fields
             .into_iter()
-            .fold(Vec::new(), |mut field_idents, field| {
+            .fold(Vec::new(), |mut fields_meta, field| {
                 let field_ident = field.ident.clone().expect("Not support tuple");
-
                 let field_name = field_ident.to_string();
 
-                order_by_fields.remove(&field_name);
-
-                if field.searchable {
-                    searchable_key_metas.push((field.ty.clone(), field_ident.clone(), field_name));
+                if let Some(order_by) = field.order_by {
+                    order_by_fragments.push(format!("{} {}", field_name, order_by));
                 }
 
-                field_idents.push(field_ident);
-                field_idents
+                fields_meta.push(FieldMeta {
+                    name: field_name,
+                    ident: field_ident,
+                    ty: field.ty.clone(),
+                    entity_type: field.field_type,
+                });
+
+                fields_meta
             });
 
-        if searchable_key_metas.is_empty() {
+        if fields_meta.iter().filter(|meta| meta.is_primary()).count() == 0 {
             panic!("No primary key found");
         }
 
-        if !order_by_fields.is_empty() {
-            panic!(
-                "The order by statement contains a non-existent columns of: {:?}",
-                order_by_fields
-            )
-        }
-
-        let order_by_tokens = match self.order_by {
-            Some(ref order_by) => {
-                let order_by = order_by.replace("asc", "ASC").replace("desc", "DESC");
-                quote! { Some(#order_by) }
+        let order_by_tokens = if order_by_fragments.is_empty() {
+            quote! { None }
+        } else {
+            let order_by_statement = order_by_fragments.join(", ");
+            quote! {
+                Some(#order_by_statement)
             }
-            None => quote! { None },
         };
 
-        let entity_field_enum_ident = Ident::new(&format!("{}Column", ident), ident.span());
-        let entity_field_tokens = searchable_key_metas
+        let entity_search_ident = Ident::new(&format!("{}Search", ident), ident.span());
+
+        let entity_field_tokens = fields_meta
             .iter()
-            .map(|(ty, ident, name)| {
-                let enum_field = Ident::new(&pascal_case(&ident.to_string()), ident.span());
-                (
-                    quote! {
-                        #enum_field(&'a #ty)
-                    },
-                    quote! {
-                        Self::#enum_field(..) => #name
-                    },
-                    quote! {
-                        Self::#enum_field(#ident) => #ident
-                    },
-                )
-            })
+            .filter(|meta| !meta.is_normal())
+            .map(
+                |FieldMeta {
+                     ty, name, ident, ..
+                 }| {
+                    (
+                        quote! {
+                            #[builder(setter(strip_option), default)]
+                            #ident: Option<std::borrow::Cow<'a, #ty>>
+                        },
+                        {
+                            let push = format!(" WHERE {} = ", name);
+                            let push_and = format!(" AND {} = ", name);
+
+                            quote! {
+                                if let Some(field) = self.#ident.clone() {
+                                    if !search_touched  {
+                                        query_builder.push(#push);
+                                        search_touched = true;
+                                    } else {
+                                        query_builder.push(#push_and);
+                                    }
+                                    query_builder.push_bind(field.into_owned());
+                                }
+                            }
+                        },
+                    )
+                },
+            )
             .collect::<Vec<_>>();
 
-        let (entity_field_definitions, entity_field_name_impls, entity_field_value_impls): (
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-        ) = multiunzip(entity_field_tokens);
+        let (entity_search_fields, entity_search_fields_where_clause): (Vec<_>, Vec<_>) =
+            multiunzip(entity_field_tokens);
 
         let insert_one_sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING RETURNING (XMAX = 0) AS inserted",
+            "INSERT INTO {0} ({1}) VALUES ({2})",
             table_name,
-            field_idents.iter().join(", "),
-            field_idents
+            fields_meta.iter().map(|meta| &meta.name).join(", "),
+            fields_meta
                 .iter()
                 .enumerate()
                 .map(|(index, ..)| format!("${}", index + 1))
                 .join(", ")
         );
 
-        let insert_one_binds = field_idents
+        let insert_or_update_sql = format!(
+            "{0} ON CONFLICT ({1}) DO UPDATE SET {2} RETURNING (XMAX=0) AS inserted",
+            insert_one_sql,
+            fields_meta
+                .iter()
+                .filter(|meta| meta.is_primary())
+                .map(|mata| &mata.name)
+                .join(", "),
+            fields_meta
+                .iter()
+                .filter(|meta| meta.is_normal())
+                .map(|meta| format!("{0} = EXCLUDED.{0}", meta.name))
+                .join(", ")
+        );
+
+        let insert_bindings = fields_meta
             .iter()
-            .map(|ident| quote! { .bind(self.#ident) });
+            .map(|FieldMeta { ident, .. }| quote! { .bind(self.#ident) });
+
+        let insert_bindings_cloned = insert_bindings.clone();
 
         quote! {
-            use crate::entity::{Entity, EntityField};
+            use std::borrow::Borrow;
 
-            pub(crate) enum #entity_field_enum_ident<'a> {
-                #(#entity_field_definitions),*
+            use crate::entity::{Entity, EntitySearch};
+
+            #[derive(derive_builder::Builder)]
+            #[builder(pattern = "owned", setter(into))]
+            pub(crate) struct #entity_search_ident<'a> {
+                #(#entity_search_fields),*
             }
 
-            impl<'a> crate::entity::EntityField for #entity_field_enum_ident<'a> {
-                fn name(&self) -> &'static str {
-                    match self {
-                        #(#entity_field_name_impls),*
-                    }
-                }
+            impl crate::entity::EntitySearch for #entity_search_ident<'_> {
 
-                fn value(&self) -> impl sqlx::Type<sqlx::Postgres> + sqlx::Encode<sqlx::Postgres> {
-                    match self {
-                        #(#entity_field_value_impls),*
-                    }
+                fn query_builder(&self, query_builder: &mut sqlx::QueryBuilder<sqlx::Postgres>) {
+                    let mut search_touched = false;
+                    query_builder.push(format!("SELECT * FROM {}", #ident::table_name()));
+                    #(#entity_search_fields_where_clause)*
                 }
             }
 
             impl #ident {
-                pub(crate) async fn fetch_one<'a, 'c, E>(columns: &[#entity_field_enum_ident<'a>],  executor: E) -> Result<Self, crate::entity::EntityError>
+                pub(crate) async fn fetch_optional_new<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Option<Self>, crate::entity::EntityError>
                 where
                     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
                 {
-                    let where_clause = columns
-                        .iter()
-                        .enumerate()
-                        .map(|(index, column)| format!("{} = ${}", column.name(), index + 1))
-                        .collect::<Vec<_>>()
-                        .join(" AND ");
+                    let mut query_builder = sqlx::QueryBuilder::new("");
+                    search.query_builder(&mut query_builder);
+                    query_builder.build_query_as().fetch_optional(executor).await.map_err(Into::into)
+                }
 
+                pub(crate) async fn fetch_one_new<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Self, crate::entity::EntityError>
+                where
+                    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+                {
+                   Self::fetch_optional_new(search, executor)
+                    .await
+                    .and_then(|optional| optional.ok_or(sqlx::Error::RowNotFound).map_err(Into::into))
+                }
 
-                    let sql = format!("SELECT * FROM {} WHERE {where_clause}", Self::table_name());
-                    let mut query = sqlx::query_as(&sql);
-                    for column in columns {
-                        query = query.bind(column.value());
-                    }
-                    query.fetch_one(executor).await.map_err(Into::into)
-               }
+                pub(crate) async fn insert_or_update<'c, E>(self, executor: E) -> Result<bool, crate::entity::EntityError>
+                where
+                    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+                {
+                    sqlx::query_as(#insert_or_update_sql)
+                        #(#insert_bindings_cloned)*
+                        .fetch_optional(executor)
+                        .await
+                        .map_err(Into::into)
+                        .map(|optional: Option<crate::entity::EntityInserted>| optional.map(|return_row| return_row.is_inserted()).unwrap_or_default())
+                }
             }
 
             impl #impl_generics crate::entity::Entity for #ident #type_generics #where_clause {
@@ -247,16 +340,16 @@ impl EntityBuilderStructReceiver {
                     #order_by_tokens
                 }
 
-                async fn insert_one<'c, E>(self, executor: E) -> Result<bool, crate::entity::EntityError>
+                async fn insert_one<'c, E>(self, executor: E) -> Result<(), crate::entity::EntityError>
                 where
                     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
                 {
-                    sqlx::query_as(#insert_one_sql)
-                        #(#insert_one_binds)*
-                        .fetch_one(executor)
+                    sqlx::query(#insert_one_sql)
+                        #(#insert_bindings)*
+                        .execute(executor)
                         .await
                         .map_err(Into::into)
-                        .map(|fetched: crate::entity::EntityInserted| fetched.is_inserted())
+                        .map(drop)
                 }
            }
         }
@@ -273,25 +366,27 @@ mod tests {
     fn print_entity_builder_render() {
         let input = r#"
 #[derive(EntityBuilder, RgbEntity)]
-#[entity(table_name = "fake_table")]
-#[entity(order_by = "name asc, age desc")]
+#[entity(table_name="fake_table")]
 struct FakeEntity {
-    #[entity(searchable)]
-    id: i64,
-    #[entity(searchable)]
+    #[entity(field_type="primary")]
+    id: Uuid,
+    #[entity(field_type="searchable")]
+    #[entity(order_by="desc")]
     name: String,
+    #[entity(order_by="asc")]
     age: i32,
-    sex: Sex,
-    data: GzipStrictType<AluVMLib>,
+    data: GzipStrictType<Foo<Bar<Demo>>>,
+    data2: GzipStrictType<String>,
 }
 "#;
         let parsed = syn::parse_str(input).unwrap();
         let receiver = EntityBuilderStructReceiver::from_derive_input(&parsed).unwrap();
         let tokens = receiver.render_entity();
-        println!("tokens: {}", tokens);
+        println!("{tokens}");
         let formatted_code = prettyplease::unparse(&syn::parse2(tokens).unwrap());
-        println!("{}", formatted_code);
-        // let tokens = receiver.render_rgb_entity();
-        // println!("{}", tokens);
+        println!("entity tokens:\n{}\n", formatted_code);
+        let tokens = receiver.render_rgb_entity();
+        let formatted_code = prettyplease::unparse(&syn::parse2(tokens).unwrap());
+        println!("rgb entity tokens:\n{}\n", formatted_code);
     }
 }

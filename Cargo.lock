@@ -3,15 +3,26 @@
 version = 3
 
 [[package]]
-name = "bitlight-core-derive"
-version = "0.3.0"
+name = "better_default"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b9a5040dce49a7642c97ccb1ae59567098967b5d52c29773f1299a42d23bb39"
 dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "bitlight-core-derive"
+version = "0.4.0"
+dependencies = [
+ "better_default",
  "darling",
  "iter_tools",
  "prettyplease",
  "proc-macro2",
  "quote",
- "stringcase",
  "syn",
 ]
 
@@ -120,12 +131,6 @@ checksum = "b5b9d34b8991d19d98081b46eacdd8eb58c6f2b201139f7c5f643cc155a633af"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "stringcase"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04028eeb851ed08af6aba5caa29f2d59a13ed168cee4d6bd753aeefcf1d636b0"
 
 [[package]]
 name = "strsim"
