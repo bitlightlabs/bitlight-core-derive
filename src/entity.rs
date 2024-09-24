@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use better_default::Default;
-use darling::{ast::Data, FromDeriveInput, FromField, FromMeta};
+use darling::{ast::Data, util::PathList, FromDeriveInput, FromField, FromMeta};
 use iter_tools::{multiunzip, Itertools};
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -26,7 +26,7 @@ impl Display for OrderBy {
 }
 
 #[derive(Clone, Copy, Default, FromMeta, Eq, PartialEq)]
-enum FieldEntityType {
+enum EntityFieldType {
     #[default]
     Normal,
     Primary,
@@ -37,16 +37,16 @@ struct FieldMeta {
     name: String,
     ident: Ident,
     ty: Type,
-    entity_type: FieldEntityType,
+    field_type: EntityFieldType,
 }
 
 impl FieldMeta {
     fn is_normal(&self) -> bool {
-        self.entity_type == FieldEntityType::Normal
+        self.field_type == EntityFieldType::Normal
     }
 
     fn is_primary(&self) -> bool {
-        self.entity_type == FieldEntityType::Primary
+        self.field_type == EntityFieldType::Primary
     }
 }
 
@@ -56,7 +56,7 @@ struct EntityBuilderFieldReceiver {
     ty: Type,
     ident: Option<Ident>,
     #[darling(default)]
-    field_type: FieldEntityType,
+    searchable: bool,
     order_by: Option<OrderBy>,
 }
 
@@ -66,6 +66,7 @@ pub(crate) struct EntityBuilderStructReceiver {
     ident: Ident,
     generics: Generics,
     table_name: String,
+    unique_columns: PathList,
     data: Data<(), EntityBuilderFieldReceiver>,
 }
 
@@ -87,7 +88,7 @@ fn append_generic_idents(
     }
 }
 
-fn type_is_gzip_strict_type(ty: &Type) -> Option<Type> {
+fn explore_gzip_strict_type(ty: &Type) -> Option<Type> {
     if let Type::Path(ref type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "GzipStrictType" {
@@ -128,7 +129,7 @@ impl EntityBuilderStructReceiver {
             .enumerate()
             .flat_map(|(index, field)| {
                 let field_ident = field_ident(field.ident.as_ref(), index);
-                type_is_gzip_strict_type(&field.ty).map(|data_ident| (field_ident, data_ident))
+                explore_gzip_strict_type(&field.ty).map(|data_ident| (field_ident, data_ident))
             })
             .collect::<Vec<_>>();
 
@@ -170,6 +171,8 @@ impl EntityBuilderStructReceiver {
 
         let (impl_generics, type_generics, where_clause) = self.generics.split_for_impl();
 
+        let unique_columns = self.unique_columns.to_strings();
+
         let mut order_by_fragments = Vec::new();
 
         let fields_meta = data
@@ -186,11 +189,24 @@ impl EntityBuilderStructReceiver {
                     order_by_fragments.push(format!("{} {}", field_name, order_by));
                 }
 
+                let mut field_type = EntityFieldType::Normal;
+
+                if unique_columns.contains(&field_name) {
+                    field_type = EntityFieldType::Primary;
+                }
+
+                if field.searchable {
+                    if field_type == EntityFieldType::Primary {
+                        panic!("Primary key must not be searchable");
+                    }
+                    field_type = EntityFieldType::Searchable;
+                }
+
                 fields_meta.push(FieldMeta {
+                    field_type,
                     name: field_name,
                     ident: field_ident,
                     ty: field.ty.clone(),
-                    entity_type: field.field_type,
                 });
 
                 fields_meta
@@ -300,7 +316,7 @@ impl EntityBuilderStructReceiver {
             }
 
             impl #ident {
-                pub(crate) async fn fetch_optional_new<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Option<Self>, crate::entity::EntityError>
+                pub(crate) async fn fetch_optional<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Option<Self>, crate::entity::EntityError>
                 where
                     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
                 {
@@ -309,11 +325,11 @@ impl EntityBuilderStructReceiver {
                     query_builder.build_query_as().fetch_optional(executor).await.map_err(Into::into)
                 }
 
-                pub(crate) async fn fetch_one_new<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Self, crate::entity::EntityError>
+                pub(crate) async fn fetch_one<'a, 'c, E>(search: #entity_search_ident<'a>,  executor: E) -> Result<Self, crate::entity::EntityError>
                 where
                     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
                 {
-                   Self::fetch_optional_new(search, executor)
+                   Self::fetch_optional(search, executor)
                     .await
                     .and_then(|optional| optional.ok_or(sqlx::Error::RowNotFound).map_err(Into::into))
                 }
@@ -366,11 +382,10 @@ mod tests {
     fn print_entity_builder_render() {
         let input = r#"
 #[derive(EntityBuilder, RgbEntity)]
-#[entity(table_name="fake_table")]
+#[entity(table_name="fake_table", unique_columns(id))]
 struct FakeEntity {
-    #[entity(field_type="primary")]
     id: Uuid,
-    #[entity(field_type="searchable")]
+    #[entity(searchable)]
     #[entity(order_by="desc")]
     name: String,
     #[entity(order_by="asc")]
@@ -382,7 +397,6 @@ struct FakeEntity {
         let parsed = syn::parse_str(input).unwrap();
         let receiver = EntityBuilderStructReceiver::from_derive_input(&parsed).unwrap();
         let tokens = receiver.render_entity();
-        println!("{tokens}");
         let formatted_code = prettyplease::unparse(&syn::parse2(tokens).unwrap());
         println!("entity tokens:\n{}\n", formatted_code);
         let tokens = receiver.render_rgb_entity();
