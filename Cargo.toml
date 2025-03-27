@@ -1,9 +1,9 @@
 [package]
 name = "bitlight-core-derive"
 description = "A Rust library providing derive macros for the Bitlight Core."
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Bitlight Labs"]
-edition = "2021"
+edition = "2024"
 homepage = "https://bitlightlabs.com/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/bitlightlabs/bitlight-core-derive"
@@ -15,7 +15,7 @@ proc-macro = true
 [dependencies]
 better_default = "1.0"
 darling = "0.20"
-iter_tools = "0.21"
+iter_tools = "0.24"
 prettyplease = "0.2"
 proc-macro2 = "1.0"
 quote = "1.0"

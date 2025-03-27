@@ -1,13 +1,13 @@
 use darling::FromDeriveInput;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Ident, Index, PathArguments, Type};
+use syn::{DeriveInput, Ident, Index, PathArguments, Type, parse_macro_input};
 
 mod entity;
 mod singer;
 
 pub(crate) fn type_is_optional(ty: &Type) -> bool {
-    if let Type::Path(ref type_path) = ty {
+    if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "Option"
                 && matches!(segment.arguments, PathArguments::AngleBracketed(..));

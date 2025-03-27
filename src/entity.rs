@@ -1,8 +1,8 @@
 use std::fmt::{self, Display, Formatter};
 
 use better_default::Default;
-use darling::{ast::Data, util::PathList, FromDeriveInput, FromField, FromMeta};
-use iter_tools::{multiunzip, Itertools};
+use darling::{FromDeriveInput, FromField, FromMeta, ast::Data, util::PathList};
+use iter_tools::{Itertools, multiunzip};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{AngleBracketedGenericArguments, GenericArgument, Generics, Ident, PathArguments, Type};
@@ -89,13 +89,13 @@ fn append_generic_idents(
 }
 
 fn explore_gzip_strict_type(ty: &Type) -> Option<Type> {
-    if let Type::Path(ref type_path) = ty {
+    if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "GzipStrictType" {
                 if let PathArguments::AngleBracketed(ref generics_arguments) = segment.arguments {
                     let mut generics_idents = String::new();
                     append_generic_idents(&mut generics_idents, generics_arguments);
-                    if let Some(GenericArgument::Type(Type::Path(ref type_path))) =
+                    if let Some(GenericArgument::Type(Type::Path(type_path))) =
                         generics_arguments.args.last()
                     {
                         return type_path.path.segments.last().and_then(|segment| {

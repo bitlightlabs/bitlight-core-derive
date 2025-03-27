@@ -31,16 +31,26 @@ impl SignerStructReceiver {
             .expect("Don't support enum")
             .fields
             .into_iter()
-            .filter(|field| !type_is_optional(&field.ty))
             .enumerate()
             .map(|(index, field)| {
                 let field_ident = field_ident(field.ident.as_ref(), index);
                 let field_name = field_ident.to_string();
                 let field_string_name = format_ident!("{}_string", field_name);
 
-                quote! {
-                    let #field_string_name = self.#field_ident.to_string();
-                    map.insert(#field_name, urlencoding::encode(&#field_string_name));
+                if type_is_optional(&field.ty) {
+                    quote! {
+                        let #field_string_name = self.#field_ident.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "".to_string());
+                         if !#field_string_name.is_empty() {
+                            map.insert(#field_name, urlencoding::encode(&#field_string_name));
+                        }
+                    }
+                } else {
+                    quote! {
+                        let #field_string_name = self.#field_ident.to_string();
+                        if !#field_string_name.is_empty() {
+                            map.insert(#field_name, urlencoding::encode(&#field_string_name));
+                        }
+                    }
                 }
             });
 
